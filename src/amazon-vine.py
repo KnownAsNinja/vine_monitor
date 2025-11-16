@@ -35,8 +35,11 @@ STATE_FILE: Final = 'vine_monitor_state.json'
 USER_AGENT: Final[str] = fake_useragent.UserAgent().ff
 
 # Discord Webhooks
-DISCORD_WEBHOOK_RFY: Final = "https://discord.com/api/webhooks/1397327066713559161/-AUIU28c1GtV3M9tBwMjzRWC-T7uw373fdOuyqVgtuUg61ocvLWWddGWazxzUf6Kech5"   # Recommended for you and Available for all
+DISCORD_WEBHOOK_RFY: Final = "https://discord.com/api/webhooks/1397327066713559161/-AUIU28c1GtV3M9tBwMjzRWC-T7uw373fdOuyqVgtuUg61ocvLWWddGWazxzUf6Kech5"   # Recommended for You and Available for all]
+DISCORD_WEBHOOK_AFA: Final = "https://discord.com/api/webhooks/1399343029092876308/oE_E4zafV-Lwbm6K8opVvY8QCNFgyoMbyV1x-39WmfSyh53LIPd_hkqI94DM1v30FO6r"
 DISCORD_WEBHOOK_AI: Final = "https://discord.com/api/webhooks/1397333337105760346/7OftTTqDWUbG0f1FpoS88vGg9kdknYqAoaSz_mEDDwVPZ8j3b2MY6nL3tS5aegvY9Npn"   # Additional Items
+DISCORD_WEBHOOK_PRIORITY: Final = "https://discord.com/api/webhooks/1399343172437413938/EZ-qn-gP_ka5jPaiheMHu_ubFPNXQScC3DUFbIjl7EtZahuPeNLIasDf1puL6AayFl2e"  # Priority Items - SET YOUR WEBHOOK URL HERE
+PRIORITY_TERMS_FILE: Final = 'priority_terms.json'
 
 @dataclass(frozen=True, eq=True)
 class VineItem:
@@ -45,6 +48,7 @@ class VineItem:
     title: str
     url: str
     image_url: str
+    queue_url: str
 
 class NotLoggedInError(Exception):
     """Custom exception for when the session is no longer valid."""
@@ -83,11 +87,59 @@ def load_state() -> Tuple[Optional[Set[VineItem]], Optional[Set[VineItem]], Opti
         logging.error("Starting with a fresh state.")
         return None, None, None
 
+def load_priority_terms() -> Set[str]:
+    """Loads priority search terms from the JSON file."""
+    if not os.path.exists(PRIORITY_TERMS_FILE):
+        logging.warning("Priority terms file not found: %s. No priority matching will occur.", PRIORITY_TERMS_FILE)
+        try:
+            with open(PRIORITY_TERMS_FILE, 'w', encoding='utf-8') as f:
+                json.dump({"terms": ["example term 1", "example phrase 2"]}, f, indent=4)
+            logging.info("Created a sample priority_terms.json file to guide you.")
+        except Exception as e: 
+            logging.error("Could not create sample priority terms file: %s", e)
+        return set()
+
+    logging.info("Loading priority terms from %s", PRIORITY_TERMS_FILE)
+    try:
+        with open(PRIORITY_TERMS_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            terms = data.get('terms', [])
+            if not isinstance(terms, list):
+                logging.error("Priority terms file is malformed: 'terms' should be a list.")
+                return set()
+            # Return terms as a set of lowercased strings for case-insensitive matching.
+            return {term.lower() for term in terms if isinstance(term, str)}
+    except (json.JSONDecodeError, TypeError) as e:
+        logging.error("Could not load or parse priority terms file %s: %s", PRIORITY_TERMS_FILE, e)
+        return set()
+
+def check_for_priority_match(item: VineItem, priority_terms: Set[str]) -> bool:
+    """
+    Checks if an item's title contains ALL of the words from any single
+    priority term (case-insensitive).
+    """
+    if not priority_terms or not item.title:
+        return False
+
+    # Create a set of unique words from the item's title for efficient lookup
+    item_title_words = set(item.title.lower().split())
+
+    # Check each priority phrase
+    for phrase in priority_terms:
+        # Create a set of words for the current priority phrase
+        phrase_words = set(phrase.lower().split())
+
+        # Check if all words in the priority phrase are present in the title
+        if phrase_words.issubset(item_title_words):
+            logging.info("Priority match found for '%s' on words from '%s'", item.title, phrase)
+            return True
+    return False
+
 def send_discord_notification(webhook_url, item, queue_name):
     """Sends a notification to a Discord webhook using an embed."""
     logging.info("Sending Discord notification for: %s", item.title)
 
-    # Use a placeholder if the title is empty, as Discord requires a non-empty title.
+    # Use a placeholder if the title is empty, as Discord requires a non-empty title.vp
     notification_title = item.title if item.title else f"New Item (ASIN: {item.asin})"
     try:
         data = {
@@ -95,11 +147,11 @@ def send_discord_notification(webhook_url, item, queue_name):
                 {
                     "title": notification_title,
                     "url": item.url,
-                    "description": f"New item found in **{queue_name}**!",
+                    "description": f"<@312951812401659905> - New item found in **{queue_name}**!",
                     "color": 5814783,  # Hex color #58D68D (a nice green)
                     "thumbnail": {"url": item.image_url},
                     "fields": [
-                        {"name": "ASIN", "value": item.asin, "inline": True}
+                        {"name": "QUEUE URL", "value": item.queue_url, "inline": True},                         
                     ],
                     "footer": {"text": "Vine Monitor"},
                     "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -115,6 +167,9 @@ def send_discord_notification(webhook_url, item, queue_name):
         with urllib.request.urlopen(req) as response:
             if response.status not in [200, 204]:
                 logging.error("Discord webhook failed with status: %d", response.status)
+                time.sleep(2)
+            else:
+                time.sleep(2)  # Wait a bit to avoid hitting rate limits
     except Exception as e:
         logging.error("Failed to send Discord notification: %s", e)
 
@@ -214,6 +269,7 @@ def get_list(br, url, name) -> Optional[Set[VineItem]]:
 
         img_element = tile.select_one("img")
         img_url = img_element['src'] if img_element else "IMG_NOT_FOUND"
+        q_url = None
 
         # The title is inside a specific span. The 'a-offscreen' class might be
         # dynamically added, so we look for the more stable 'a-truncate-full'.
@@ -227,14 +283,33 @@ def get_list(br, url, name) -> Optional[Set[VineItem]]:
         if not all([asin, relative_url]):
             logging.warning("Could not parse a tile completely in %s. Tile: %s", name, tile)
             continue
+        
+        if name == "Recommended for You":
+            q_url = RFY_URL
+        elif name == "Available for All":
+            q_url = AFA_URL
+        else:
+            if title and title != "TITLE_NOT_FOUND":
+                        search_words = title.split()[:3]
+                        search_term = ' '.join(search_words)
+                        q_url = (
+                            "https://www.amazon.co.uk/vine/vine-items?search=" +
+                            urllib.parse.quote_plus(search_term)
+                        )
+            else:
+                q_url = ADDITIONAL_ITEMS_URL
 
+
+        # Create the VineItem object
         item = VineItem(
             asin=asin,
             title=title,
             url=full_url,
-            image_url=img_url
+            image_url=img_url,
+            queue_url=q_url
         )
-        if item in items:
+        
+        if any(existing_item.asin == item.asin for existing_item in items):
             logging.warning('Duplicate in-stock item found in %s: %s', name, item.asin)
         items.add(item)
 
@@ -249,7 +324,7 @@ def open_product_page(br, item: VineItem) -> bool:
     soup = download_vine_page(br, item.url)
     # Make sure we don't get a 404 or some other error
     if soup:
-        logging.info('New item found: %s - %s', item.asin, item.title)
+        logging.debug('New item found: %s - %s', item.asin, item.title)
         # Display how much tax it costs
         # This part might need updating based on the new product page structure
         # For now, we just open the page.
@@ -259,7 +334,6 @@ def open_product_page(br, item: VineItem) -> bool:
     else:
         logging.warning('Invalid item page or error for ASIN: %s', item.asin)
         return False
-
 
 def get_full_additional_items_list(browser):
     """Fetches all pages for the 'Additional Items' queue and aggregates them."""
@@ -282,34 +356,38 @@ def get_full_additional_items_list(browser):
     return full_list if any_page_fetched else None
 
 
-def check_and_update_queues(browser, rfy_list, your_queue_list, vine_for_all_list):
+def check_and_update_queues(browser, rfy_list, your_queue_list, vine_for_all_list, priority_terms):
     """
     Checks all item queues, logs new items, and returns the updated lists.
     """
     # Check the RFY list
-    rfy_list2 = get_list(browser, RFY_URL, "Recommended for you")
+    rfy_list2 = get_list(browser, RFY_URL, "Recommended for You")
     if rfy_list2 is not None:
         for item in rfy_list2.copy():
             if item not in rfy_list:
-                logging.info("Found new item in 'Recommended for you': %s", item.title)
-                logging.info("  ASIN: %s", item.asin)
-                logging.info("  URL: %s", item.url)
-                logging.info("  Image: %s", item.image_url)
+                logging.debug("Found new item in 'Recommended for You': %s", item.title)
+                logging.debug("  ASIN: %s", item.asin)
+                logging.debug("  URL: %s", item.url)
+                logging.debug("  Image: %s", item.image_url)
                 if DISCORD_WEBHOOK_RFY:
-                    send_discord_notification(DISCORD_WEBHOOK_RFY, item, "Recommended for you")
+                    send_discord_notification(DISCORD_WEBHOOK_RFY, item, "Recommended for You")
+                if DISCORD_WEBHOOK_PRIORITY and check_for_priority_match(item, priority_terms):
+                    send_discord_notification(DISCORD_WEBHOOK_PRIORITY, item, "PRIORITY: Recommended for You")
         rfy_list = rfy_list2
 
     # Check Available for All list
-    vine_for_all_list2 = get_list(browser, AFA_URL, "Available for all")
+    vine_for_all_list2 = get_list(browser, AFA_URL, "Available for All")
     if vine_for_all_list2 is not None:
         for item in vine_for_all_list2.copy():
             if item not in vine_for_all_list:
-                logging.info("Found new item in 'Available for all': %s", item.title)
-                logging.info("  ASIN: %s", item.asin)
-                logging.info("  URL: %s", item.url)
-                logging.info("  Image: %s", item.image_url)
-                if DISCORD_WEBHOOK_RFY:
-                    send_discord_notification(DISCORD_WEBHOOK_RFY, item, "Available for All")
+                logging.debug("Found new item in 'Available for All': %s", item.title)
+                logging.debug("  ASIN: %s", item.asin)
+                logging.debug("  URL: %s", item.url)
+                logging.debug("  Image: %s", item.image_url)
+                if DISCORD_WEBHOOK_AFA:
+                    send_discord_notification(DISCORD_WEBHOOK_AFA, item, "Available for All")
+                if DISCORD_WEBHOOK_PRIORITY and check_for_priority_match(item, priority_terms):
+                    send_discord_notification(DISCORD_WEBHOOK_PRIORITY, item, "PRIORITY: Available for All")
         vine_for_all_list = vine_for_all_list2
 
     # Check the Additional Items list
@@ -317,22 +395,16 @@ def check_and_update_queues(browser, rfy_list, your_queue_list, vine_for_all_lis
     if your_queue_list2 is not None:
         for item in your_queue_list2.copy():
             if item not in your_queue_list:
-                logging.info("Found new item in 'Additional Items': %s", item.title)
-                logging.info("  ASIN: %s", item.asin)
-                logging.info("  URL: %s", item.url)
-                logging.info("  Image: %s", item.image_url)
-
-                if item.title and item.title != "TITLE_NOT_FOUND":
-                    search_words = item.title.split()[:3]
-                    search_term = ' '.join(search_words)
-                    search_url = (
-                        "https://www.amazon.co.uk/vine/vine-items?search=" +
-                        urllib.parse.quote_plus(search_term)
-                    )
-                    logging.info("  Search URL: %s", search_url)
+                logging.debug("Found new item in 'Additional Items': %s", item.title)
+                logging.debug("  ASIN: %s", item.asin)
+                logging.debug("  URL: %s", item.url)
+                logging.debug("  Image: %s", item.image_url)
+                logging.debug("  Search URL: %s", item.queue_url)
 
                 if DISCORD_WEBHOOK_AI:
                     send_discord_notification(DISCORD_WEBHOOK_AI, item, "Additional Items")
+                if DISCORD_WEBHOOK_PRIORITY and check_for_priority_match(item, priority_terms):
+                    send_discord_notification(DISCORD_WEBHOOK_PRIORITY, item, f"PRIORITY: Additional Items")
 
         your_queue_list = your_queue_list2
 
@@ -350,13 +422,20 @@ parser.add_option('--browser', dest='browser',
 setup_logging()
 logging.info("Vine Monitor starting up.")
 logging.info("Using browser: %s", OPTIONS.browser)
-
+ 
+# Load priority terms
+priority_terms = load_priority_terms()
+if priority_terms:
+    logging.info("Loaded %d priority terms.", len(priority_terms))
 
 if DISCORD_WEBHOOK_RFY:
-    logging.info("Discord notifications enabled for Recommended for You and Available for All.")
+    logging.debug("Discord notifications enabled for Recommended for You and Available for All.")
 
 if DISCORD_WEBHOOK_AI:
-    logging.info("Discord notifications enabled for Additional Items.")
+    logging.debug("Discord notifications enabled for Additional Items.")
+
+if DISCORD_WEBHOOK_PRIORITY:
+    logging.debug("Discord notifications enabled for Priority Items.")
 
 try:
     BROWSER = create_browser()
@@ -370,7 +449,7 @@ rfy_list, your_queue_list, vine_for_all_list = load_state()
 
 if rfy_list is None:  # No state file found or it was empty/invalid
     logging.info("No previous state found. Performing initial scan.")
-    rfy_list = get_list(BROWSER, RFY_URL, "Recommended for you")
+    rfy_list = get_list(BROWSER, RFY_URL, "Recommended for You")
     your_queue_list = get_full_additional_items_list(BROWSER)
     vine_for_all_list = get_list(BROWSER, AFA_URL, "Available for all")
 
@@ -389,7 +468,7 @@ else:
 while True:
     try:
         rfy_list, your_queue_list, vine_for_all_list = check_and_update_queues(
-            BROWSER, rfy_list, your_queue_list, vine_for_all_list
+            BROWSER, rfy_list, your_queue_list, vine_for_all_list, priority_terms
         )
     except NotLoggedInError as e:
         logging.error("Session expired or login failed: %s", e)
@@ -403,13 +482,14 @@ while True:
             except NotLoggedInError as retry_e:
                 logging.error("Failed to re-establish session: %s", retry_e)
                 logging.info("Please log in to Amazon in your browser.")
-                logging.info("Will retry in 5 minutes...")
-                time.sleep(300)
+                slp_time = random.randint(120, 180)  # Wait between 3 and 5 minutes before retrying
+                logging.info("Retrying in %d seconds...", slp_time)
+                time.sleep(slp_time)  # Wait between 3 and 5 minutes before retrying
         continue  # Go back to the top of the loop to check immediately
     except Exception:
         logging.critical("An unexpected error occurred in the main loop.", exc_info=True)
 
-    wait_seconds = random.randint(420, 720)
+    wait_seconds = random.randint(240, 400) # Wait between 4 and 6 minutes before the next check
     logging.info("Waiting for %d seconds (%.1f minutes) for the next check.",
                  wait_seconds, wait_seconds / 60.0)
     time.sleep(wait_seconds)
