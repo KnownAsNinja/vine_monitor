@@ -1,6 +1,7 @@
 import logging
 import copy
 import time
+import random
 import urllib.parse
 import urllib.error
 import webbrowser
@@ -169,6 +170,8 @@ class VineClient:
             if page_num == 1:
                 page_url = config.ADDITIONAL_ITEMS_URL
             else:
+                # Sleep between pages to avoid burst detection
+                time.sleep(random.uniform(2, 4))
                 page_url = f"{config.ADDITIONAL_ITEMS_URL}&pn=&cn=&page={page_num}"
 
             page_items = self.get_list(page_url, f"Additional Items (Page {page_num})")
