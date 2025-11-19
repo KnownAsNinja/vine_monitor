@@ -3,3 +3,10 @@
 .venv
 index.txt
 .pytest_cache
+priority_terms.json
+vine_monitor_state.json
+vine_monitor.log
+vine_monitor.log.*
+.env
+*.bak
+__pycache__/

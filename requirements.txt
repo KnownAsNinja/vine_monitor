@@ -1,0 +1,11 @@
+beautifulsoup4>=4.7.1
+mechanize>=0.4.0
+fake-useragent>=0.1.11
+python-dotenv>=0.19.0
+browsercookie>=0.7.5
+lxml>=4.3.1
+requests>=2.20.0
+# Dev dependencies (optional, relaxed versions)
+pylint
+autopep8
+mypy
